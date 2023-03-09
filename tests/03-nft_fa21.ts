@@ -1,0 +1,1108 @@
+import { Bytes, Key, Nat, Option, Or, pair_to_mich, Signature, string_to_mich } from '@completium/archetype-ts-types'
+import { blake2b, expect_to_fail, get_account, set_mockup, set_mockup_now, set_quiet } from '@completium/experiment-ts'
+
+import { get_packed_transfer_params, get_transfer_permit_data, get_missigned_error, wrong_packed_transfer_params, wrong_sig } from './utils'
+
+import assert from 'assert';
+
+/* Contracts */
+
+import { aleph_token } from '../binding/aleph_token';
+import { balance_of_request, nft_fa21, gasless_param, operator_param, part, transfer_destination, transfer_param } from '../binding/nft_fa21';
+import { add, Permits, permits, permits_value, user_permit } from '../binding/permits';
+import { ticket_wallet } from '../binding/ticket_wallet';
+import { sync } from '../binding/sync';
+
+/* Accounts ----------------------------------------------------------------- */
+
+const alice = get_account('alice');
+const bob = get_account('bob');
+const carl = get_account('carl');
+const user1 = get_account('bootstrap1');
+const user2 = get_account('bootstrap2');
+
+/* Endpoint ---------------------------------------------------------------- */
+
+set_mockup()
+
+/* Verbose mode ------------------------------------------------------------ */
+
+set_quiet(true);
+
+/* Now --------------------------------------------------------------------- */
+
+const now = new Date(Date.now())
+set_mockup_now(now)
+
+/* Constants & Utils ------------------------------------------------------- */
+
+const amount = new Nat(1);
+const token_id = new Nat(0);
+const one_token_id = new Nat(1);
+const expiry = new Nat(31556952)
+
+const error_key_exists_ledger = pair_to_mich([string_to_mich("\"KEY_EXISTS\""), string_to_mich("\"ledger\"")])
+const error_permit_expired = (v: number) => pair_to_mich([string_to_mich("\"PERMIT_EXPIRED\""), new Nat(v).to_mich()])
+const get_ref_user_permits = (counter: Nat, data: Bytes, expiry: Nat, now: Date) => {
+  return new permits_value(counter, Option.None<Nat>(), [[
+    blake2b(data),
+    new user_permit(Option.Some<Nat>(expiry), new Date(now.getTime() - now.getMilliseconds() + (now.getMilliseconds() % 1000 == 0 ? 0 : 1000)))
+  ]])
+}
+
+const permits_aleph_tokens = new Permits()
+
+const aleph_token_id = new Nat(0);
+const amount_aleph = new Nat(1);
+const hash_aleph = '';
+
+/* Scenarios --------------------------------------------------------------- */
+
+describe('[NFT] Contracts deployment', async () => {
+  it('Ticket_wallet contract deployment should succeed', async () => {
+    await ticket_wallet.deploy({ as: carl })
+  });
+
+  it('Permits contract deployment should succeed', async () => {
+    await permits_aleph_tokens.deploy(alice.get_address(), { as: alice })
+  });
+
+  it('Aleph Token contract deployment should succeed', async () => {
+    await aleph_token.deploy(alice.get_address(), permits_aleph_tokens.get_address(), { as: alice })
+  });
+
+  it('Sync contract deployment should succeed', async () => {
+    await sync.deploy({ as: alice })
+  });
+
+  it('Permits contract deployment should succeed', async () => {
+    await permits.deploy(alice.get_address(), { as: alice })
+  });
+
+  it('NFT contract deployment should succeed', async () => {
+    await nft_fa21.deploy(alice.get_address(), permits.get_address(), aleph_token.get_address(), sync.get_address(), { as: alice })
+  });
+});
+
+describe('[NFT] Contract configuration', async () => {
+  it("Add FA2 as permit consumer", async () => {
+    await permits.manage_consumer(new add(nft_fa21.get_address()), { as: alice })
+  })
+
+})
+
+describe('[NFT] Minting', async () => {
+  it('Mint tokens on FA2 as owner for owner should succeed', async () => {
+    await aleph_token.update_operators([Or.Left(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+    await nft_fa21.mint(
+      alice.get_address(),      // owner
+      token_id,                 // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph,
+      { as: alice }
+    );
+    await aleph_token.update_operators([Or.Right(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+    const owner = await nft_fa21.get_ledger_value(token_id)
+    assert(owner?.equals(alice.get_address()))
+  });
+
+  it('Mint tokens on FA2 as non owner should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.mint(
+        bob.get_address(),         // owner
+        token_id.plus(new Nat(1)), // token id
+        [['', new Bytes('')]],     // metadata
+        [                          // royalties
+          new part(alice.get_address(), new Nat(1000)),
+          new part(bob.get_address(), new Nat(500))
+        ],
+        amount_aleph,
+        hash_aleph, {
+        as: bob,
+      });
+    }, nft_fa21.errors.INVALID_CALLER);
+  });
+
+  it('Mint tokens on FA2 as owner for someone else should succeed', async () => {
+    await aleph_token.mint(carl.get_address(), amount_aleph, { as: alice })
+    await aleph_token.update_operators([Or.Left(new operator_param(carl.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: carl })
+    await nft_fa21.mint(
+      carl.get_address(),        // owner
+      token_id.plus(new Nat(1)), // token id
+      [['', new Bytes('')]],     // metadata
+      [                          // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    });
+    await aleph_token.update_operators([Or.Right(new operator_param(carl.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: carl })
+    const owner = await nft_fa21.get_ledger_value(token_id.plus(new Nat(1)))
+    assert(owner?.equals(carl.get_address()))
+  });
+
+  it('Re-Mint same tokens on FA2 contract should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.mint(
+        alice.get_address(),       // owner
+        token_id,                  // token id
+        [['', new Bytes('')]],     // metadata
+        [                          // royalties
+          new part(alice.get_address(), new Nat(1000)),
+          new part(bob.get_address(), new Nat(500))
+        ],
+        amount_aleph,
+        hash_aleph, {
+        as: alice,
+      }
+      );
+    }, error_key_exists_ledger);
+  });
+
+});
+
+describe('[NFT] Add permit', async () => {
+  it('Add a permit with the wrong signature should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(bob.get_address(), token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+
+    await expect_to_fail(async () => {
+      await permits.permit(new Key(alice.pubk), wrong_sig, blake2b(packed_transfer_params), { as: bob })
+    }, get_missigned_error(permit_data))
+
+  });
+
+  it('Add a permit with the wrong hash should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(bob.get_address(), token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+
+    const wrong_permit_data = get_transfer_permit_data(
+      wrong_packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+
+    await expect_to_fail(async () => {
+      const sig = await alice.sign(permit_data)
+      await permits.permit(new Key(alice.pubk), sig, blake2b(wrong_packed_transfer_params), { as: bob })
+    }, get_missigned_error(wrong_permit_data));
+  });
+
+  it('Add a permit with the wrong public key should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(carl.get_address(), token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+
+    await expect_to_fail(async () => {
+      const sig = await alice.sign(permit_data)
+      await permits.permit(new Key(bob.pubk), sig, blake2b(packed_transfer_params), { as: bob })
+    }, get_missigned_error(permit_data));
+  });
+
+  it('Add a permit with the good hash, signature and public key should succeed', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(carl.get_address(), one_token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+    await permits.permit(new Key(alice.pubk), sig, blake2b(packed_transfer_params), { as: bob })
+
+    const added_permit = await permits.get_permits_value(alice.get_address())
+    assert(added_permit?.equals(get_ref_user_permits(new Nat(1), packed_transfer_params, expiry, now)))
+  });
+
+  it('Add a duplicated permit should fail', async () => {
+    const initial_permit = await permits.get_permits_value(alice.get_address())
+
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(carl.get_address(), one_token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    assert(initial_permit?.equals(get_ref_user_permits(new Nat(1), packed_transfer_params, expiry, now)))
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    await expect_to_fail(async () => {
+      await permits.permit(new Key(alice.pubk), sig, blake2b(packed_transfer_params), { as: bob })
+    }, pair_to_mich([string_to_mich("DUP_PERMIT"), blake2b(packed_transfer_params).to_mich()]));
+  });
+
+});
+
+describe('[NFT] Transfers', async () => {
+  it('Transfer a token not owned should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer([new transfer_param(
+        alice.get_address(),
+        [new transfer_destination(bob.get_address(), new Nat(777), amount)])],
+        { as: alice });
+    }, nft_fa21.errors.FA2_TOKEN_UNDEFINED);
+  });
+
+  it('Transfer a token from another user without a permit or an operator should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer([new transfer_param(
+        alice.get_address(),
+        [new transfer_destination(bob.get_address(), token_id, amount)])
+      ],
+        { as: bob });
+    }, nft_fa21.errors.FA2_NOT_OPERATOR);
+  });
+
+  it('Transfer more tokens than owned should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer([new transfer_param(
+        alice.get_address(),
+        [new transfer_destination(bob.get_address(), token_id, new Nat(999))])],
+        { as: alice });
+    }, nft_fa21.errors.FA2_INSUFFICIENT_BALANCE);
+  });
+
+  it('Transfer tokens without operator and an expired permit should fail', async () => {
+
+    set_mockup_now(now);
+
+    const new_expiry = new Nat(3600);
+
+    let alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(bob.get_address(), token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    await permits.permit(new Key(alice.pubk), sig, blake2b(packed_transfer_params), { as: carl })
+
+    const alice_permit = await permits.get_permits_value(alice.get_address())
+    const created_at = alice_permit?.user_permits[0][1].created_at
+
+    await permits.set_expiry(Option.Some<Nat>(new_expiry), Option.Some<Bytes>(blake2b(packed_transfer_params)), { as: alice })
+
+
+    set_mockup_now(new Date(now.getTime() + 3610 * 1000))
+
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer(tps, { as: bob })
+    }, error_permit_expired(created_at != undefined ? created_at.getTime() / 1000 + 3600 : 0))
+  });
+
+  it('Transfer tokens with an operator and with permit (permit not consumed) should succeed', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(carl.get_address(), token_id, amount)])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    await permits.permit(alice.get_public_key(), sig, blake2b(packed_transfer_params), { as: bob })
+
+    const added_permits = await permits.get_permits_value(alice.get_address())
+    const permits_count = added_permits?.user_permits.length
+
+    await nft_fa21.update_operators([
+      Or.Left(new operator_param(alice.get_address(), carl.get_address(), token_id))
+    ], { as: alice })
+
+    const token_owner = await nft_fa21.get_ledger_value(token_id)
+    assert(token_owner?.equals(alice.get_address()))
+
+    await nft_fa21.transfer(tps, { as: carl })
+
+    const token_owner_after = await nft_fa21.get_ledger_value(token_id)
+    assert(token_owner_after?.equals(carl.get_address()))
+
+    // check that permits was NOT consumed
+    const added_permits_after = await permits.get_permits_value(alice.get_address())
+    const permits_count_after = added_permits_after?.user_permits.length
+    assert(permits_count == permits_count_after)
+  });
+
+  it('Transfer tokens without an operator and a valid permit (permit consumed)', async () => {
+    const another_token = new Nat(12)
+
+    await aleph_token.update_operators([Or.Left(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+    await nft_fa21.mint(
+      alice.get_address(),      // owner
+      another_token,            // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    }
+    );
+    await aleph_token.update_operators([Or.Right(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(bob.get_address(), another_token, amount)])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    await permits.permit(alice.get_public_key(), sig, blake2b(packed_transfer_params), { as: carl })
+
+    const added_permits = await permits.get_permits_value(alice.get_address())
+    const permits_count = added_permits?.user_permits.length
+
+    const token_owner = await nft_fa21.get_ledger_value(another_token)
+    assert(token_owner?.equals(alice.get_address()), "Invalid owner before")
+
+    await nft_fa21.transfer(tps, { as: carl })
+
+    const token_owner_after = await nft_fa21.get_ledger_value(another_token)
+    assert(token_owner_after?.equals(bob.get_address()), "Invalid owner after")
+
+    // check that permits WAS consumed
+    const added_permits_after = await permits.get_permits_value(alice.get_address())
+    const permits_count_after = added_permits_after?.user_permits.length
+    if (permits_count && permits_count_after)
+      assert(permits_count == permits_count_after + 1, "Invalid counts: " + permits_count + " vs. " + permits_count_after)
+    else
+      assert(false, "Invalid counts")
+  });
+})
+
+describe('[NFT] Transfers gasless ', async () => {
+  it('Transfer a token not owned should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), token_id, amount)
+      ])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    const not_owned_token = new Nat(777)
+    const another_tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), not_owned_token, amount)
+      ])]
+
+    const another_packed = get_packed_transfer_params(another_tps)
+    const another_permit_data = get_transfer_permit_data(
+      another_packed,
+      permits.get_address(),
+      alice_permit_counter);
+
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer_gasless([
+        new gasless_param(another_tps, alice.get_public_key(), sig)
+      ], { as: alice })
+    }, get_missigned_error(another_permit_data))
+
+  });
+
+  it('Transfer a token from another user with wrong a permit should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), token_id, amount)
+      ])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    const not_owned_token = new Nat(1)
+    const another_tps = [
+      new transfer_param(alice.get_address(),
+        [new transfer_destination(bob.get_address(), not_owned_token, amount)]
+      )
+    ]
+
+    const another_packed = get_packed_transfer_params(another_tps)
+    const another_permit_data = get_transfer_permit_data(
+      another_packed,
+      permits.get_address(),
+      alice_permit_counter);
+
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer_gasless([
+        new gasless_param(another_tps, alice.get_public_key(), sig)
+      ], { as: alice })
+    }, get_missigned_error(another_permit_data))
+  });
+
+  it('Transfer more tokens than owned should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), token_id, new Nat(777777))
+      ])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer_gasless([
+        new gasless_param(tps, alice.get_public_key(), sig)
+      ], { as: alice })
+    }, nft_fa21.errors.FA2_INSUFFICIENT_BALANCE)
+  });
+
+  it('Transfer tokens with from different signer should fail', async () => {
+    const new_token = new Nat(11111)
+
+    await aleph_token.mint(carl.get_address(), amount_aleph, {as: alice});
+    await aleph_token.update_operators([Or.Left(new operator_param(carl.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: carl })
+    await nft_fa21.mint(
+      carl.get_address(),       // owner
+      new_token,                // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    }
+    );
+    await aleph_token.update_operators([Or.Left(new operator_param(carl.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: carl })
+
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(carl.get_address(),
+      [new transfer_destination(bob.get_address(), new_token, amount)]
+    )]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    const token_owner = await nft_fa21.get_ledger_value(new_token)
+    assert(token_owner?.equals(carl.get_address()), "Invalid owner before")
+
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer_gasless([
+        new gasless_param(tps, alice.get_public_key(), sig)
+      ], { as: alice })
+    }, nft_fa21.errors.SIGNER_NOT_FROM)
+  });
+
+  it('Transfer tokens with permit should succeed', async () => {
+    const new_token = new Nat(11112)
+
+    await aleph_token.update_operators([Or.Left(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+    await nft_fa21.mint(
+      alice.get_address(),      // owner
+      new_token,                // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    }
+    );
+    await aleph_token.update_operators([Or.Right(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), new_token, amount)]
+    )]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    const token_owner = await nft_fa21.get_ledger_value(new_token)
+    assert(token_owner?.equals(alice.get_address()), "Invalid owner before")
+
+    await nft_fa21.transfer_gasless([
+      new gasless_param(tps, alice.get_public_key(), sig)
+    ], { as: alice })
+
+    const token_owner_after = await nft_fa21.get_ledger_value(new_token)
+    assert(token_owner_after?.equals(bob.get_address()), "Invalid owner after")
+  });
+});
+
+describe('[NFT] Transfers one-step ', async () => {
+  it('Transfer a token not owned should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), token_id, amount)
+      ])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await bob.sign(permit_data)
+
+    const not_owned_token = new Nat(777)
+    const another_tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), not_owned_token, amount)
+      ])]
+
+    const lpermit = Option.Some<[Key, Signature]>([bob.get_public_key(), sig]);
+
+    await expect_to_fail(async () => {
+      await nft_fa21.permit_transfer(another_tps, lpermit, { as: bob })
+    }, nft_fa21.errors.SIGNER_NOT_FROM)
+
+  });
+
+  it('Transfer a token from another user with wrong a permit should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), token_id, amount)
+      ])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    const not_owned_token = new Nat(1)
+    const another_tps = [
+      new transfer_param(alice.get_address(),
+        [new transfer_destination(bob.get_address(), not_owned_token, amount)]
+      )
+    ]
+
+    const another_packed = get_packed_transfer_params(another_tps)
+    const another_permit_data = get_transfer_permit_data(
+      another_packed,
+      permits.get_address(),
+      alice_permit_counter);
+    const lpermit = Option.Some<[Key, Signature]>([alice.get_public_key(), sig]);
+
+    await expect_to_fail(async () => {
+      await nft_fa21.permit_transfer(another_tps, lpermit, { as: alice })
+    }, get_missigned_error(another_permit_data))
+  });
+
+  it('Transfer more tokens than owned should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), token_id, new Nat(777777))
+      ])]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+    const lpermit = Option.Some<[Key, Signature]>([alice.get_public_key(), sig]);
+
+    await expect_to_fail(async () => {
+      await nft_fa21.permit_transfer(tps, lpermit, { as: alice })
+    }, nft_fa21.errors.FA2_INSUFFICIENT_BALANCE)
+  });
+
+  it('Transfer tokens with from different signer should fail', async () => {
+    const new_token = new Nat(11211)
+
+    await aleph_token.mint(carl.get_address(), amount_aleph, {as: alice});
+    await aleph_token.update_operators([Or.Left(new operator_param(carl.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: carl })
+    await nft_fa21.mint(
+      carl.get_address(),       // owner
+      new_token,                // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    }
+    );
+    await aleph_token.update_operators([Or.Right(new operator_param(carl.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: carl })
+
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(carl.get_address(),
+      [new transfer_destination(bob.get_address(), new_token, amount)]
+    )]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+    const lpermit = Option.Some<[Key, Signature]>([alice.get_public_key(), sig]);
+
+    const token_owner = await nft_fa21.get_ledger_value(new_token)
+    assert(token_owner?.equals(carl.get_address()), "Invalid owner before")
+
+    await expect_to_fail(async () => {
+      await nft_fa21.permit_transfer(tps, lpermit, { as: alice })
+    }, nft_fa21.errors.SIGNER_NOT_FROM)
+  });
+
+  it('Transfer tokens with permit should succeed', async () => {
+    const new_token = new Nat(11212)
+
+    await aleph_token.update_operators([Or.Left(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+    await nft_fa21.mint(
+      alice.get_address(),      // owner
+      new_token,                // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    }
+    );
+    await aleph_token.update_operators([Or.Right(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(bob.get_address(), new_token, amount)]
+    )]
+
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+    const lpermit = Option.Some<[Key, Signature]>([alice.get_public_key(), sig]);
+
+    const token_owner = await nft_fa21.get_ledger_value(new_token)
+    assert(token_owner?.equals(alice.get_address()), "Invalid owner before")
+
+    await nft_fa21.permit_transfer(tps, lpermit, { as: alice })
+
+    const token_owner_after = await nft_fa21.get_ledger_value(new_token)
+    assert(token_owner_after?.equals(bob.get_address()), "Invalid owner after")
+  });
+});
+
+describe('[NFT] Set metadata', async () => {
+  it('Set metadata with empty content should succeed', async () => {
+    const metadata_before = await nft_fa21.get_metadata_value("key")
+    assert(metadata_before == undefined);
+
+    await nft_fa21.set_metadata("key", Option.Some(new Bytes("")), { as: alice })
+
+    const metadata_after = await nft_fa21.get_metadata_value("key")
+    assert(metadata_after?.equals(new Bytes("")));
+  });
+
+  it('Set metadata called by not owner should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.set_metadata("key", Option.Some(new Bytes("")), { as: bob })
+    }, nft_fa21.errors.INVALID_CALLER);
+  });
+
+  it('Set metadata with valid content should succeed', async () => {
+    const data = new Bytes('697066733a2f2f516d617635756142437a4d77377871446f55364d444534743473695855484e4737664a68474c746f79774b35694a');
+    const metadata_before = await nft_fa21.get_metadata_value("key")
+    assert(metadata_before?.equals(new Bytes("")), "Invalid metadata before");
+
+    await nft_fa21.set_metadata("key", Option.Some(data), { as: alice })
+
+    const metadata_after = await nft_fa21.get_metadata_value("key")
+    assert(metadata_after?.equals(data));
+  });
+});
+
+describe('[NFT] Set expiry', async () => {
+
+  it('Set global expiry with too big value should fail', async () => {
+    await expect_to_fail(async () => {
+      await permits.set_expiry(Option.Some(new Nat('999999999999999999999999999999999999999')), Option.None(), { as: alice })
+    }, permits.errors.r2);
+  });
+
+  it('Set expiry for an existing permit with too big value should fail', async () => {
+    const counter = (await permits.get_permits_value(alice.get_address()))?.counter
+
+    const tps = [new transfer_param(alice.get_address(),
+      [new transfer_destination(user1.get_address(), token_id, amount)
+      ])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      counter);
+    const sig = await alice.sign(permit_data)
+
+    await permits.permit(alice.get_public_key(), sig, blake2b(packed_transfer_params), { as: bob })
+
+    await expect_to_fail(async () => {
+      await permits.set_expiry(
+        Option.Some<Nat>(new Nat('999999999999999999999999999999999999999')),
+        Option.Some<Bytes>(permit_data),
+        { as: alice }
+      )
+    }, permits.errors.r2);
+  });
+
+  it('Set expiry with 0 (permit get deleted) should succeed', async () => {
+    const counter = (await permits.get_permits_value(user2.get_address()))?.counter
+
+    const tps = [new transfer_param(user2.get_address(),
+      [new transfer_destination(user1.get_address(), token_id, amount)
+      ])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      counter);
+    const sig = await user2.sign(permit_data)
+
+    await permits.permit(user2.get_public_key(), sig, blake2b(packed_transfer_params), { as: bob })
+
+    const added_permits = await permits.get_permits_value(user2.get_address())
+    const permits_count = added_permits?.user_permits.length
+    assert(permits_count ? permits_count == 1 : false)
+
+    await permits.set_expiry(
+      Option.Some<Nat>(new Nat(0)),
+      Option.Some<Bytes>(blake2b(packed_transfer_params)),
+      { as: user2 }
+    )
+
+    const added_permits_after = await permits.get_permits_value(user2.get_address())
+    const permits_count_after = added_permits_after?.user_permits.length
+    assert(permits_count_after != undefined ? permits_count_after == 0 : false, "Invalid count after: " + permits_count_after)
+  });
+
+  it('Set expiry with a correct value should succeed', async () => {
+    const counter = (await permits.get_permits_value(carl.get_address()))?.counter
+
+    const tps = [new transfer_param(carl.get_address(),
+      [new transfer_destination(bob.get_address(), token_id, new Nat(11))
+      ])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      counter);
+    const sig = await carl.sign(permit_data)
+
+    await permits.permit(carl.get_public_key(), sig, blake2b(packed_transfer_params), { as: alice })
+
+    await permits.set_expiry(
+      Option.Some(new Nat(8)),
+      Option.Some(blake2b(packed_transfer_params)),
+      { as: carl }
+    )
+
+    const permit_after = await permits.get_permits_value(carl.get_address())
+    assert(permit_after?.user_permits[0][1].expiry.get().equals(new Nat(8)))
+
+  });
+
+});
+
+describe('[NFT] Burn', async () => {
+  it('Burn without tokens should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.burn(token_id, { as: alice })
+    }, nft_fa21.errors.FA2_NOT_OWNER);
+  });
+
+  it('Burn tokens with enough tokens should succeed', async () => {
+    const new_token = new Nat(999)
+
+    await aleph_token.update_operators([Or.Left(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+    await nft_fa21.mint(
+      alice.get_address(),      // owner
+      new_token,                // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    }
+    );
+    await aleph_token.update_operators([Or.Right(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+
+    const owner = await nft_fa21.get_ledger_value(new_token)
+    assert(owner?.equals(alice.get_address()))
+
+    await nft_fa21.burn(new_token, { as: alice })
+
+    const new_owner = await nft_fa21.get_ledger_value(new_token)
+    assert(new_owner == undefined)
+  });
+
+  it('Re-mint a burnt token', async () => {
+    const new_token = new Nat(999)
+
+    await aleph_token.update_operators([Or.Left(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+    await nft_fa21.mint(
+      alice.get_address(),      // owner
+      new_token,                // token id
+      [['', new Bytes('')]],    // metadata
+      [                         // royalties
+        new part(alice.get_address(), new Nat(1000)),
+        new part(bob.get_address(), new Nat(500))
+      ],
+      amount_aleph,
+      hash_aleph, {
+      as: alice,
+    }
+    );
+    await aleph_token.update_operators([Or.Right(new operator_param(alice.get_address(), nft_fa21.get_address(), aleph_token_id))], { as: alice })
+
+    const owner = await nft_fa21.get_ledger_value(new_token)
+    assert(owner?.equals(alice.get_address()))
+
+    await nft_fa21.burn(new_token, { as: alice })
+
+    const new_owner = await nft_fa21.get_ledger_value(new_token)
+    assert(new_owner == undefined)
+  });
+});
+
+describe('[NFT] Pause', async () => {
+  it('Set FA2 on pause should succeed', async () => {
+    await nft_fa21.pause({ as: alice });
+    const is_paused = await nft_fa21.get_paused()
+    assert(is_paused);
+  });
+  it('Set Permits on pause should succeed', async () => {
+    await permits.pause({ as: alice });
+    const is_paused = await nft_fa21.get_paused()
+    assert(is_paused);
+  });
+
+  it('Minting is not possible when contract is paused should fail', async () => {
+    await expect_to_fail(async () => {
+      const new_token = new Nat(999)
+
+      await nft_fa21.mint(
+        alice.get_address(),      // owner
+        new_token,                // token id
+        [['', new Bytes('')]],    // metadata
+        [                         // royalties
+          new part(alice.get_address(), new Nat(1000)),
+          new part(bob.get_address(), new Nat(500))
+        ],
+        amount_aleph,
+        hash_aleph, {
+        as: alice,
+      }
+      );
+    }, nft_fa21.errors.CONTRACT_PAUSED);
+  });
+
+  it('Update operators is not possible when contract is paused should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.update_operators([
+        Or.Left(new operator_param(alice.get_address(), nft_fa21.get_address(), token_id))
+      ], { as: alice })
+    }, nft_fa21.errors.CONTRACT_PAUSED);
+  });
+
+  it('Add permit is not possible when contract is paused should fail', async () => {
+    const alice_permit_counter = (await permits.get_permits_value(alice.get_address()))?.counter
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(bob.get_address(), token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+    const permit_data = get_transfer_permit_data(
+      packed_transfer_params,
+      permits.get_address(),
+      alice_permit_counter);
+    const sig = await alice.sign(permit_data)
+
+    await expect_to_fail(async () => {
+      await permits.permit(alice.get_public_key(), sig, blake2b(packed_transfer_params), { as: alice });
+    }, nft_fa21.errors.CONTRACT_PAUSED);
+  });
+
+  it('Transfer is not possible when contract is paused should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.transfer([new transfer_param(
+        user1.get_address(),
+        [new transfer_destination(user2.get_address(), token_id, new Nat(1))])],
+        { as: user1 });
+    }, nft_fa21.errors.CONTRACT_PAUSED);
+  });
+
+  it('Set metadata is not possible when contract is paused should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.set_metadata("key", Option.Some(new Bytes("")), { as: alice })
+    }, nft_fa21.errors.CONTRACT_PAUSED);
+  });
+
+  it('Set expiry is not possible when contract is paused should fail', async () => {
+    const tps = [new transfer_param(alice.get_address(), [new transfer_destination(bob.get_address(), token_id, amount)])]
+    const packed_transfer_params = get_packed_transfer_params(tps)
+
+    await expect_to_fail(async () => {
+      await permits.set_expiry(Option.Some(new Nat(0)), Option.Some(packed_transfer_params), { as: alice })
+    }, nft_fa21.errors.CONTRACT_PAUSED);
+  });
+
+  it('Burn is not possible when contract is paused should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.burn(new Nat(1), { as: alice })
+    }, nft_fa21.errors.CONTRACT_PAUSED);
+  });
+
+  it('Unpause by not owner should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.unpause({ as: bob });
+    }, nft_fa21.errors.INVALID_CALLER);
+  });
+
+  it('Unpause by owner should succeed', async () => {
+    await nft_fa21.unpause({ as: alice });
+    await permits.unpause({ as: alice });
+  });
+});
+
+describe('[NFT] Transfer ownership', async () => {
+
+  it('Transfer ownership when contract is paused should succeed', async () => {
+    const owner = await nft_fa21.get_owner()
+    assert(owner.equals(alice.get_address()));
+    await nft_fa21.declare_ownership(alice.get_address(), { as: alice });
+    const new_owner = await nft_fa21.get_owner()
+    assert(owner.equals(new_owner));
+  });
+
+  it('Transfer ownership as non owner should fail', async () => {
+    await expect_to_fail(async () => {
+      await nft_fa21.declare_ownership(bob.get_address(), { as: bob });
+    }, nft_fa21.errors.INVALID_CALLER);
+  });
+
+  it('Transfer ownership as owner should succeed', async () => {
+    const owner = await nft_fa21.get_owner()
+    assert(owner.equals(alice.get_address()));
+    await nft_fa21.declare_ownership(bob.get_address(), { as: alice })
+    await nft_fa21.claim_ownership({ as: bob });
+    const new_owner = await nft_fa21.get_owner()
+    assert(new_owner.equals(bob.get_address()));
+  });
+});
+
+describe('[NFT] Balance of', async () => {
+
+  it('Unknown token_id should fail', async () => {
+    const fake_token = new Nat(56)
+    await expect_to_fail(async () => {
+      await nft_fa21.balance_of([new balance_of_request(alice.get_address(), fake_token)], { as: alice })
+    }, nft_fa21.errors.FA2_TOKEN_UNDEFINED)
+  });
+
+  // describe('[FA2.1] Ticket', async () => {
+  //   it('Export', async () => {
+  //     const ticket_before = await ticket_wallet.get_my_ticket();
+  //     assert(ticket_before.is_none(), "Invalid value")
+  
+  //     const k = new ledger_key(alice.get_address(), token_id);
+  //     const token_id_balance_before = await fa2_1.get_ledger_value(k);
+  //     assert(token_id_balance_before?.equals(amount), "Invalid value")
+  
+  //     const entry = new Entrypoint(ticket_wallet.get_address(), "callback");
+  //     const eti = [new export_ticket_item(alice.get_address(), token_id, export_amount)];
+  //     await nft_fa21.export_ticket(Or.Left<Entrypoint, Entrypoint>(entry), eti, { as: alice });
+  
+  //     const ticket_after = (await ticket_wallet.get_my_ticket()).get();
+  //     assert(ticket_after.get_ticketer().equals(fa2_1.get_address()) && ticket_after.get_amount().equals(export_amount), "Invalid value")
+  
+  //     const token_id_balance_after = await fa2_1.get_ledger_value(k);
+  //     assert(token_id_balance_after?.equals(new Nat(amount.to_number() - export_amount.to_number())), "Invalid value")
+  //   });
+  
+  //   it('Import', async () => {
+  //     await ticket_wallet.transfer_ticket(fa2_1.get_address(), alice.get_address(), { as: alice })
+  
+  //     const ticket_after = await ticket_wallet.get_my_ticket();
+  //     assert(ticket_after.is_none(), "Invalid value")
+  
+  //     const k = new ledger_key(alice.get_address(), token_id);
+  //     const token_id_balance_after = await fa2_1.get_ledger_value(k);
+  //     assert(token_id_balance_after?.equals(amount), "Invalid value")
+  //   });
+  // });
+});

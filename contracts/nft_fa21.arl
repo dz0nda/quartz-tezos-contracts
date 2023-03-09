@@ -1,0 +1,625 @@
+archetype nft(owner : address, permits : address, aleph_tokens : address, aleph_sync : address)
+with metadata ""
+
+/* CONSTANTS -------------------------------------------------------------- */
+
+constant STORE_IPFS               : string = "STORE_IPFS"
+
+/* CONTRACT METADATA ------------------------------------------------------- */
+
+entry set_metadata(k: string, d : option<bytes>) {
+  called by owner
+  require { md_r1 : is_not_paused() }
+  effect {
+    metadata.update(k, d)
+  }
+}
+
+/* OWNERSHIP TRANSFER ------------------------------------------------------- */
+
+variable owner_candidate : option<address> = none
+
+entry declare_ownership(candidate : address) {
+  called by owner
+  effect {
+    owner_candidate := some(candidate);
+  }
+}
+
+entry claim_ownership() {
+  require {
+    ownership_r1: (owner_candidate ? the = caller : false) otherwise "INVALID_CALLER"
+  }
+  effect {
+    owner := caller;
+    owner_candidate := none
+  }
+}
+
+/*  PAUSABLE ----------------------------------------------------------------- */
+
+variable paused : bool = false
+
+function is_not_paused() : bool {
+  do_fail_if(paused, "CONTRACT_PAUSED");
+  return true
+}
+
+entry pause() {
+  called by owner
+  require {
+    pausable_r1: is_not_paused()
+  }
+  effect {
+    paused := true
+  }
+}
+
+entry unpause() {
+  called by owner
+  require {
+    pausable_r2: paused otherwise "CONTRACT_NOT_PAUSED"
+  }
+  effect {
+    paused := false
+  }
+}
+
+
+/* TOKEN METADATA ------------------------------------------------------------ */
+
+asset token_metadata to big_map {
+  ftoken_metadata : nat;
+  token_id        : nat;
+  token_info      : map<string, bytes>;
+}
+
+entry set_token_metadata (tid : nat, tdata: map<string, bytes>) {
+  no transfer
+  called by owner
+  require { tmd_r1: is_not_paused() }
+  effect {
+    token_metadata.add_update(tid, { token_id = tid; token_info = tdata });
+  }
+}
+
+
+
+/* SETTERS ---------------------------------------------------------------- */
+
+/**
+ * Pause the contract execution
+ */
+entry set_aleph_contract() {
+  called by owner
+  effect {
+    do_require(not paused, "CONTRACT_PAUSED");
+    paused := true
+  }
+}
+
+/* ERRORS ----------------------------------------------------------------- */
+
+constant CALLER_NOT_OWNER             : string = "CALLER_NOT_OWNER"
+constant SIGNER_NOT_FROM              : string = "SIGNER_NOT_FROM"
+constant INVALID_TICKET_VALUE         : string = "INVALID_TICKET_VALUE"
+constant FA2_INSUFFICIENT_BALANCE     : string = "FA2_INSUFFICIENT_BALANCE"
+constant FA2_NOT_OPERATOR             : string = "FA2_NOT_OPERATOR"
+constant FA2_INVALID_AMOUNT           : string = "FA2_INVALID_AMOUNT"
+constant FA2_NOT_OWNER                : string = "FA2_NOT_OWNER"
+constant FA2_TOKEN_UNDEFINED          : string = "FA2_TOKEN_UNDEFINED"
+constant FA2_1_UNSAFE_APPROVAL_CHANGE : string = "FA2.1_UNSAFE_APPROVAL_CHANGE"
+constant FA2_1_NOT_ENOUGH_ALLOWANCE   : string = "FA2.1_NOT_ENOUGH_ALLOWANCE"
+constant FA2_1_INVALID_TICKET         : string = "FA2.1_INVALID_TICKET"
+
+/* PARAMETERS ------------------------------------------------------------- */
+
+record transfer_destination {
+  to_dest           : address;
+  token_id_dest     : nat;
+  token_amount_dest : nat
+} as ((%to_, (token_id, amount)))
+
+record transfer_param {
+  tp_from : address;
+  tp_txs  : list<transfer_destination>;
+} as ((%from_, %txs))
+
+record transfer_event_item_dest {
+  teid_to_      : option<address>;
+  teid_token_id : nat;
+  teid_amount   : nat
+} as ((%to_, (token_id, amount)))
+
+record transfer_event_item {
+  tei_from_ : option<address>;
+  tei_txs: list<transfer_event_item_dest>;
+} as ((from_, txs))
+
+record operator_update_item {
+  oui_owner : address;
+  oui_operator : address;
+  oui_token_id : nat;
+  oui_is_operator : bool;
+} as ((owner, operator, token_id, is_operator))
+
+record approve_param {
+  ar_owner: address;
+  ar_spender: address;
+  ar_token_id: nat;
+  ar_value : nat;
+} as ((%owner, %spender, %token_id, %value))
+
+record approve_event_item {
+  aei_owner: address;
+  aei_spender: address;
+  aei_token_id: nat;
+  aei_value : nat;
+} as ((%owner, %spender, %token_id, %new_value))
+
+/* STORAGE ---------------------------------------------------------------- */
+
+asset ledger identified by ltokenid to big_map {
+  ltokenid   : nat;
+  lowner     : address;
+}
+
+asset total_supply_ to big_map {
+  tstokenid : nat;
+  tsamount  : nat = 0;
+}
+
+record part {
+  part_account : address;
+  part_value   : nat;
+}
+
+asset royalties identified by rtokenid to big_map {
+  rtokenid : nat;
+  rvalue : list<part>;
+}
+
+asset operator identified by oaddr otoken oowner to big_map {
+  oaddr       : address;
+  otoken      : nat;
+  oowner      : address;
+}
+
+asset operator_for_all identified by fa_oaddr fa_oowner to big_map {
+  fa_oaddr    : address;
+  fa_oowner   : address;
+}
+
+asset approve_ identified by aowner aspender atoken_id to big_map {
+  aowner: address;
+  aspender: address;
+  atoken_id: nat;
+  avalue : nat;
+}
+
+/* EVENTS ----------------------------------------------------------------- */
+
+event balance_event {
+  be_pkh : address;
+  be_token_id : nat;
+  be_amount: nat;
+} as ((pkh, token_id, amount))
+
+event mint_event {
+  me_receiver : address;
+  me_token_id : nat;
+  me_amount: nat;
+} as ((pkh, token_id, amount))
+
+event burn_event {
+  bee_consumer : address;
+  bee_token_id : nat;
+  bee_amount: nat;
+} as ((pkh, token_id, amount))
+
+// event transfer_event {
+//   te_from : address;
+//   te_to : address;
+//   te_token_id : nat;
+//   te_amount: nat;
+// } as ((%from, %to, token_id, amount))
+
+event transfer_event {
+  te_sender : address;
+  te_transfer : list<transfer_event_item>
+} as ((sender, %transfer))
+
+event operator_update_event {
+  oue_sender : address;
+  oue_operator_update : list<operator_update_item>
+} as ((sender, %transfer))
+
+event approval_event {
+  ae_sender : address;
+  ae_approval_update : list<approve_event_item>
+} as ((sender, approval_update))
+
+/* FUNCTIONS --------------------------------------------------------------- */
+
+function get_from(txs : list<transfer_param>) : option<address> {
+  match txs with
+  | hd::tl -> begin
+    const %from = hd.tp_from;
+    for tx in tl do
+      do_require(%from = tx.tp_from, FA2_NOT_OPERATOR)
+    done;
+    return some(%from)
+  end
+  | [] -> return none
+  end
+}
+
+function check_operator(txs : list<transfer_param>) : bool {
+  var res = true;
+  for tx in txs do
+    const %from = tx.tp_from;
+    const tds = tx.tp_txs;
+    for td in tds do begin
+      res &=
+        if caller <> %from then
+          (operator.contains((caller, td.token_id_dest, %from)) or
+           operator_for_all.contains((caller, %from)))
+        else
+          true;
+    end
+    done
+  done;
+  return res
+}
+
+function make_operator_update_item (iparam : operator_param, io : bool) : operator_update_item {
+  return {
+      oui_owner = iparam.opp_owner;
+      oui_operator = iparam.opp_operator;
+      oui_token_id = iparam.opp_token_id;
+      oui_is_operator = io
+  }
+}
+
+/* ENTRYPOINTS ------------------------------------------------------------- */
+
+record operator_param {
+  opp_owner    : address;
+  opp_operator : address;
+  opp_token_id : nat
+} as ((owner, (operator, token_id)))
+
+entry update_operators (upl : list<or<operator_param, operator_param>>) {
+  no transfer
+  require { fa2_r1 : is_not_paused() }
+  effect {
+    for up in upl do
+      match up with
+      | left(param) -> (* add *)
+        do_require(param.opp_owner = caller , FA2_NOT_OWNER);
+        operator.put({param.opp_operator; param.opp_token_id; param.opp_owner})
+      | right(param) -> (* remove *)
+        do_require(param.opp_owner = caller , FA2_NOT_OWNER);
+        operator.remove((param.opp_operator, param.opp_token_id, param.opp_owner))
+      end;
+    done;
+    emit<operator_update_event>({oue_sender = caller; oue_operator_update = map(upl, up ->
+    match up with
+     | left(param)  -> make_operator_update_item (param, true)
+     | right(param) -> make_operator_update_item (param, false)
+    end)})
+  }
+}
+
+enum update_for_all_op =
+| add_for_all<address>
+| remove_for_all<address>
+
+entry update_operators_for_all (upl : list<update_for_all_op>) {
+  no transfer
+  require { fa2_r2 : is_not_paused() }
+  effect {
+    for up in upl do
+      match up with
+      | add_for_all(op) ->
+          operator_for_all.put({ op; caller })
+      | remove_for_all(op) ->
+          operator_for_all.remove((op, caller))
+      end;
+    done;
+  }
+}
+
+entry approve(input : list<approve_param>) {
+  for i in input do
+    const k = (i.ar_owner, i.ar_spender, i.ar_token_id);
+    const v = approve_[k] ? the.avalue : 0;
+    do_fail_if(v > 0, (FA2_1_UNSAFE_APPROVAL_CHANGE, v));
+    approve_.put({aowner = i.ar_owner; aspender = i.ar_spender; atoken_id = i.ar_token_id; avalue = i.ar_value})
+  done;
+  emit<approval_event>({ae_sender = caller; ae_approval_update = map(input, x -> { aei_owner = x.ar_owner; aei_spender = x.ar_spender; aei_token_id = x.ar_token_id; aei_value = x.ar_value})})
+}
+
+entry do_transfer(txs : list<transfer_param>) {
+  no transfer
+  called by self_address
+  effect {
+    for tx in txs do
+      const %from = tx.tp_from;
+      const tds   = tx.tp_txs;
+      for td in tds do begin
+        const tokenid = td.token_id_dest;
+        const towner ?= ledger[tokenid]?.lowner : FA2_TOKEN_UNDEFINED;
+        if td.token_amount_dest > 0
+        then begin
+          do_require(towner = %from and td.token_amount_dest = 1, FA2_INSUFFICIENT_BALANCE);
+          ledger.update(tokenid, { lowner = td.to_dest })
+        end;
+        emit<transfer_event>({te_sender = caller; te_transfer = map(txs, tx -> {tei_from_ = some(tx.tp_from); tei_txs = map(tx.tp_txs, x -> {teid_to_ = some(td.to_dest); teid_token_id = tokenid; teid_amount = td.token_amount_dest})})});
+        emit<balance_event>({ be_pkh = %from; be_token_id = tokenid; be_amount = 0});
+        emit<balance_event>({ be_pkh = td.to_dest; be_token_id = tokenid; be_amount = 1});
+      end done
+    done
+  }
+}
+
+record gasless_param {
+  transfer_params : list<transfer_param>;
+  user_pk         : key;
+  user_sig        : signature
+}
+
+function check_owner(addr : address, txs : list<transfer_param>) : bool {
+  var res = true;
+  for tx in txs do
+    res &= addr = tx.tp_from
+  done;
+  return res
+}
+
+entry transfer_gasless (batch : list<gasless_param>) {
+  no transfer
+  require { fa2_r3 : is_not_paused() }
+  effect {
+    for b in batch do
+      const txs = b.transfer_params;
+      const pk  = b.user_pk;
+      const sig = b.user_sig;
+      const pkh_signer = key_to_address(pk);
+      do_require(check_owner(pkh_signer, txs), SIGNER_NOT_FROM);
+      transfer 0tz to permits
+        call check<key * signature * bytes>((pk, sig, blake2b(pack(txs))));
+      transfer 0tz to entry self.do_transfer(txs);
+    done
+  }
+}
+
+entry %transfer (txs : list<transfer_param>) {
+  no transfer
+  require { fa2_r4 : is_not_paused() }
+  effect {
+    if not check_operator(txs) then begin
+      match get_from(txs) with
+      | some(%from) ->
+        transfer 0tz to permits
+          call consume<address * bytes * string>((%from, blake2b(pack(txs)), FA2_NOT_OPERATOR))
+      | none -> ()
+      end
+    end;
+
+    transfer 0tz to entry self.do_transfer(txs);
+  }
+}
+
+//----------------------------------------------------------------------------
+// Mint & burn
+//----------------------------------------------------------------------------
+
+/**
+* Mint new token
+* @param iowner owner of the token
+* @param itokenid id of token
+* @param iamount amount of token
+*/
+entry mint (iowner : address, itokenid : nat, itokenMetadata: map<string, bytes>, iroyalties : list<part>, iamount_aleph : nat, ihash : string) {
+  no transfer
+  called by owner
+  require { r11: is_not_paused() }
+  effect {
+    ledger.add({ ltokenid = itokenid; lowner = iowner });
+    token_metadata.add_update(itokenid, {token_id = itokenid; token_info = itokenMetadata});
+    royalties.add_update(itokenid, { rvalue = iroyalties });
+    total_supply_.add_update(itokenid, {tsamount += 1});
+    transfer 0tz to aleph_tokens call %transfer<list<address * list<address * nat * nat>>>([(iowner, [(self_address, 0, iamount_aleph)])]);
+    transfer 0tz to aleph_sync call doMessage<string * string>((STORE_IPFS, ihash));
+
+    emit<mint_event>({ me_receiver = iowner; me_token_id = itokenid; me_amount = 1});
+    emit<balance_event>({ be_pkh = iowner; be_token_id = itokenid; be_amount = 1});
+  }
+}
+
+/**
+* Burn an amount of token
+* @param itokenid token to burn
+*/
+entry burn(itokenid : nat, nbt : nat) {
+  no transfer
+  require { r2 : is_not_paused() }
+  effect {
+    do_require(ledger.contains(itokenid), FA2_TOKEN_UNDEFINED);
+    do_require(ledger[itokenid].lowner = caller, FA2_NOT_OWNER);
+    ledger.remove(itokenid);
+    token_metadata.remove(itokenid);
+    royalties.remove(itokenid);
+
+    emit<burn_event>({ bee_consumer = caller; bee_token_id = itokenid; bee_amount = 0});
+    emit<balance_event>({ be_pkh = caller; be_token_id = itokenid; be_amount = 0});
+    emit<transfer_event>({te_sender = caller; te_transfer = [{tei_from_ = some(caller); tei_txs = [{teid_to_ = none; teid_token_id = itokenid; teid_amount = nbt}]}]}) 
+  }
+}
+
+record export_ticket_item {
+  eti_from     : address;
+  eti_token_id : nat;
+  eti_amount   : nat;
+} as ((%from, token_id, amount))
+
+entry export_ticket(
+  destination : or<contract<ticket<nat * option<bytes>>>, contract<list<ticket<nat * option<bytes>>>>>,
+  tickets_to_export : list<export_ticket_item>
+) {
+  var l : list<ticket<nat * option<bytes>>> = [];
+  var ltransfer_event_item : list<transfer_event_item> = [];
+  for eti in tickets_to_export do
+    const %from = eti.eti_from;
+    const ltoken_id = eti.eti_token_id;
+
+    if caller = %from or operator.contains((caller, ltoken_id, %from)) then
+      () // do nothing
+    else begin
+      const k = (caller, %from, ltoken_id);
+      const vapprove_a ?= approve_[k] : FA2_NOT_OPERATOR;
+      do_require(vapprove_a.avalue >= eti.eti_amount, FA2_1_NOT_ENOUGH_ALLOWANCE);
+      approve_.update(k, {avalue -= eti.eti_amount})
+    end;
+
+    const br: balance_of_request = { bo_owner = %from; btoken_id = ltoken_id };
+    const amount = get_balance(br);
+    const new_amount ?=
+        int_to_nat(amount - eti.eti_amount) : FA2_INSUFFICIENT_BALANCE;
+    if new_amount = 0 then ledger.remove((ltoken_id));
+    const t ?= create_ticket((ltoken_id, none<bytes>), eti.eti_amount) : INVALID_TICKET_VALUE;
+    l.prepend(t);
+    const item : transfer_event_item = {tei_from_ = some(%from); tei_txs = [{teid_to_ = none; teid_token_id = ltoken_id; teid_amount = eti.eti_amount}]};
+    ltransfer_event_item.prepend(item);
+  done;
+  emit<transfer_event>({te_sender = caller; te_transfer = ltransfer_event_item});
+  for op in match destination with
+      | left(c)  -> map(l, x -> make_operation(0tz, c, x))
+      | right(c) -> [make_operation(0tz, c, l)]
+    end do
+    transfer op;
+  done
+}
+
+record import_ticket_param {
+  itp_to: address;
+  itp_tickets: ticket<nat * option<bytes>>;
+} as ((%to_, %tickets_to_import))
+
+entry import_ticket(input : list<import_ticket_param>) {
+  var ltransfer_event_item_dest : list<transfer_event_item_dest> = [];
+  for i in input do
+    const t : (address * (nat * option<bytes>) * nat) = read_ticket(i.itp_tickets);
+    const addr = t[0];
+    const ltoken_id = t[1][0];
+    const amount = t[2];
+    do_require(addr = self_address, FA2_1_INVALID_TICKET);
+    ledger.add_update((ltoken_id), { lowner = i.itp_to });
+    const teid : transfer_event_item_dest = {teid_to_ = some(i.itp_to); teid_token_id = ltoken_id; teid_amount = amount};
+    ltransfer_event_item_dest.prepend(teid)
+  done;
+  emit<transfer_event>({te_sender = caller; te_transfer = [{tei_from_ = none; tei_txs = ltransfer_event_item_dest}]})
+}
+
+/* GETTERS ----------------------------------------------------------------- */
+
+record balance_of_request {
+  bo_owner : address;
+  btoken_id : nat;
+} as ((owner, token_id))
+
+record balance_of_response {
+  request : balance_of_request;
+  balance_ : nat;
+} as ((request, balance))
+
+function get_balance(br : balance_of_request) : nat {
+  const token ?= ledger[br.btoken_id] : FA2_TOKEN_UNDEFINED;
+  return (token.lowner = br.bo_owner ? 1 : 0)
+}
+
+getter balance_of (requests : list<balance_of_request>) : list<balance_of_response> {
+  return map(requests, br -> {
+    request = br;
+    balance_ = get_balance(br)
+  })
+}
+
+/* VIEWS ------------------------------------------------------------------- */
+
+/**
+* View (since Hangzhou) to return token's royalties
+* @param tokenId token id
+* Note: returns empty list if token does not exist in royalties map
+*/
+view get_royalties(tokenId : nat) : list<part> {
+  return (royalties[tokenId] ? the.rvalue : make_list<part>([]))
+}
+
+view balance_of_ (requests : list<balance_of_request>) : list<balance_of_response> {
+  return map(requests, br ->
+    {
+      request = br;
+      balance_ = (ledger[(br.btoken_id)] ? (the.lowner = br.bo_owner ? 1 : 0)  : 0)
+    })
+}
+
+record total_supply_request {
+  tt_req_token_id : nat;
+} as (token_id)
+
+record total_supply_response {
+  tt_resp_token_id : nat;
+  tt_resp_total_supply : nat;
+} as ((token_id, total_supply))
+
+view total_supply(requests : list<total_supply_request>) : list<total_supply_response> {
+  return map(requests, tsr -> {tt_resp_token_id = tsr.tt_req_token_id; tt_resp_total_supply = total_supply_[tsr.tt_req_token_id].tsamount})
+}
+
+/* TZIP-017 One-step  ------------------------------------------------------ */
+
+entry permit_transfer (txs : list<transfer_param>, permit : option<key * signature>) {
+  no transfer
+  require { fa2_r9 : is_not_paused() }
+  effect {
+    match permit with
+    | some(p) -> begin
+        const pk = p[0];
+        const sig = p[1];
+        const pkh_signer = key_to_address(pk);
+        do_require(check_owner(pkh_signer, txs), SIGNER_NOT_FROM);
+        transfer 0tz to permits
+            call check<key * signature * bytes>((pk, sig, blake2b(pack(txs))));
+        transfer 0tz to entry self.do_transfer(txs);
+    end
+    | none -> begin
+      if not check_operator(txs) then begin
+        match get_from(txs) with
+        | some(%from) ->
+          transfer 0tz to permits
+            call consume<address * bytes * string>((%from, blake2b(pack(txs)), FA2_NOT_OPERATOR))
+        | none -> ()
+        end
+      end;
+      transfer 0tz to entry self.do_transfer(txs);
+    end
+    end
+  }
+}
+
+//----------------------------------------------------------------------------
+// Utils
+//----------------------------------------------------------------------------
+
+/**
+* Collect balance to dst address
+* @param dst collector
+*/
+entry collect(dst : address) {
+  called by owner
+  effect {
+    transfer balance to dst
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "Mysterious contract",
+  "desciption": "TODO",
+  "version": "1.0",
+  "license": {
+    "name": "MIT"
+  },
+  "homepage": "https://homepage.com",
+  "authors": [
+    "Mysterious team <toto@gmail.com>"
+  ],
+  "interfaces": [
+    "TZIP-016"
+  ]
+}

@@ -1,0 +1,35 @@
+archetype sync
+with metadata ""
+
+//----------------------------------------------------------------------------
+// Events
+//----------------------------------------------------------------------------
+
+event SyncEvent {
+  timestamp : date;
+  addr      : address;
+  message   : string;
+}
+
+event MessageEvent {
+  timestamp  : date;
+  addr       : address;
+  msgtype    : string;
+  msgcontent : string;
+}
+
+//----------------------------------------------------------------------------
+// Entrypoints
+//----------------------------------------------------------------------------
+
+entry doEmit(imessage : string) {
+  effect {
+    emit<SyncEvent>({now; caller; imessage})
+  }
+}
+
+entry doMessage(imsgtype : string, imsgcontent : string) {
+  effect {
+    emit<MessageEvent>({now; caller; imsgtype; imsgcontent})
+  }
+}
